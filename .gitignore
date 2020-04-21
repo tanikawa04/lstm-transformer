@@ -119,6 +119,7 @@ work_dirs/
 # Pytorch
 *.pth
 
+data/wikitext-103
 models/*
 !models/.gitkeep
 result/*
