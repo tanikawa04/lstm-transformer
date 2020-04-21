@@ -1,61 +1,49 @@
-# Word-level language modeling RNN
+# LSTM+Transformer Text Generation
 
-This example trains a multi-layer RNN (Elman, GRU, or LSTM) on a language modeling task.
-By default, the training script uses the Wikitext-2 dataset, provided.
-The trained model can then be used by the generate script to generate new text.
+<!-- Please read [this article]() (in Japanese). -->
 
-```bash
-python main.py --cuda --epochs 6           # Train a LSTM on Wikitext-2 with CUDA
-python main.py --cuda --epochs 6 --tied    # Train a tied LSTM on Wikitext-2 with CUDA
-python main.py --cuda --epochs 6 --model Transformer --lr 5
-                                           # Train a Transformer model on Wikitext-2 with CUDA
-python main.py --cuda --tied               # Train a tied LSTM on Wikitext-2 with CUDA for 40 epochs
-python generate.py                         # Generate samples from the trained LSTM model.
-python generate.py --cuda --model Transformer
-                                           # Generate samples from the trained Transformer model.
+This repository is based on [Word Language Model of pytorch/examples](https://github.com/pytorch/examples/tree/490243127c02a5ea3348fa4981ecd7e9bcf6144c/word_language_model).
+
+## Installation
+
+### For Pip
+
+```
+pip install -r requirements.txt
 ```
 
-The model uses the `nn.RNN` module (and its sister modules `nn.GRU` and `nn.LSTM`)
-which will automatically use the cuDNN backend if run on CUDA with cuDNN installed.
+### For Pipenv
 
-During training, if a keyboard interrupt (Ctrl-C) is received,
-training is stopped and the current model is evaluated against the test dataset.
+Python 3.8 is required.
 
-The `main.py` script accepts the following arguments:
-
-```bash
-optional arguments:
-  -h, --help                       show this help message and exit
-  --data DATA                      location of the data corpus
-  --model MODEL                    type of recurrent net (RNN_TANH, RNN_RELU, LSTM, GRU)
-  --emsize EMSIZE                  size of word embeddings
-  --nhid NHID                      number of hidden units per layer
-  --nlayers NLAYERS                number of layers
-  --lr LR                          initial learning rate
-  --clip CLIP                      gradient clipping
-  --epochs EPOCHS                  upper epoch limit
-  --batch_size N                   batch size
-  --bptt BPTT                      sequence length
-  --dropout DROPOUT                dropout applied to layers (0 = no dropout)
-  --decay DECAY                    learning rate decay per epoch
-  --tied                           tie the word embedding and softmax weights
-  --seed SEED                      random seed
-  --cuda                           use CUDA
-  --log-interval N                 report interval
-  --save SAVE                      path to save the final model
-  --onnx-export                    path to export the final model in onnx format
-  --transformer_head N             the number of heads in the encoder/decoder of the transformer model
-  --transformer_encoder_layers N   the number of layers in the encoder of the transformer model
-  --transformer_decoder_layers N   the number of layers in the decoder of the transformer model
-  --transformer_d_ff N             the number of nodes on the hidden layer in feed forward nn
+```
+pipenv install
 ```
 
-With these arguments, a variety of models can be tested.
-As an example, the following arguments produce slower but better models:
+### Note
 
-```bash
-python main.py --cuda --emsize 650 --nhid 650 --dropout 0.5 --epochs 40
-python main.py --cuda --emsize 650 --nhid 650 --dropout 0.5 --epochs 40 --tied
-python main.py --cuda --emsize 1500 --nhid 1500 --dropout 0.65 --epochs 40
-python main.py --cuda --emsize 1500 --nhid 1500 --dropout 0.65 --epochs 40 --tied
+If you use TensorBoard, [install TensorFlow](https://www.tensorflow.org/install/pip).
+
+
+## Usage
+
+Preparing Wikitext-103 corpus
+
+```
+./download_wikitext_103.sh
+```
+
+Training
+
+```
+./train.sh [ LSTMTransformer, Transformer, LSTM ]
+
+// You can use TensorBoard
+tensorboard --logdir=./logs
+```
+
+Generating text
+
+```
+./generate.sh [ LSTMTransformer, Transformer, LSTM ]
 ```
