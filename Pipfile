@@ -6,8 +6,8 @@ verify_ssl = true
 [dev-packages]
 
 [packages]
-torch = "*"
-numpy = "*"
+torch = "==1.4.*"
+numpy = "==1.18.*"
 
 [requires]
 python_version = "3.8"
