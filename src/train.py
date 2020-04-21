@@ -5,24 +5,28 @@ import math
 import os
 import torch
 import torch.nn as nn
+import torch.optim as optim
 import torch.onnx
+from torch.utils.tensorboard import SummaryWriter
 
 import data
 import model
 
-parser = argparse.ArgumentParser(description='PyTorch Wikitext-2 RNN/LSTM/GRU/Transformer Language Model')
+parser = argparse.ArgumentParser(description='PyTorch RNN/LSTM/GRU/Transformer/LSTMTransformer Language Model')
 parser.add_argument('--data', type=str, default='../data/wikitext-2',
                     help='location of the data corpus')
 parser.add_argument('--model', type=str, default='LSTM',
-                    help='type of recurrent net (RNN_TANH, RNN_RELU, LSTM, GRU, Transformer)')
+                    help='type of recurrent net (RNN_TANH, RNN_RELU, LSTM, GRU, Transformer, LSTMTransformer)')
 parser.add_argument('--emsize', type=int, default=200,
                     help='size of word embeddings')
 parser.add_argument('--nhid', type=int, default=200,
                     help='number of hidden units per layer')
 parser.add_argument('--nlayers', type=int, default=2,
                     help='number of layers')
-parser.add_argument('--lr', type=float, default=20,
-                    help='initial learning rate')
+parser.add_argument('--warm-up', type=int, default=4000,
+                    help='number of steps to warm up')
+parser.add_argument('--step-size', type=int, default=1,
+                    help='period of learning rate decay')
 parser.add_argument('--clip', type=float, default=0.25,
                     help='gradient clipping')
 parser.add_argument('--epochs', type=int, default=40,
@@ -39,10 +43,14 @@ parser.add_argument('--seed', type=int, default=1111,
                     help='random seed')
 parser.add_argument('--cuda', action='store_true',
                     help='use CUDA')
+parser.add_argument('--val-interval', type=int, default=5000, metavar='N',
+                    help='validation interval')
 parser.add_argument('--log-interval', type=int, default=200, metavar='N',
                     help='report interval')
 parser.add_argument('--save', type=str, default='model.pt',
                     help='path to save the final model')
+parser.add_argument('--tb-log', type=str, default='logs',
+                    help='path to save tensorboard log')
 parser.add_argument('--onnx-export', type=str, default='',
                     help='path to export the final model in onnx format')
 
@@ -84,7 +92,7 @@ def batchify(data, bsz):
     data = data.narrow(0, 0, nbatch * bsz)
     # Evenly divide the data across the bsz batches.
     data = data.view(bsz, -1).t().contiguous()
-    return data.to(device)
+    return data
 
 eval_batch_size = 10
 train_data = batchify(corpus.train, args.batch_size)
@@ -96,12 +104,33 @@ test_data = batchify(corpus.test, eval_batch_size)
 ###############################################################################
 
 ntokens = len(corpus.dictionary)
-if args.model == 'Transformer':
+if args.model == 'LSTMTransformer':
+    model = model.LSTMTransformerModel(ntokens, args.emsize, args.nhead, args.nhid, args.nlayers, args.dropout).to(device)
+elif args.model == 'Transformer':
     model = model.TransformerModel(ntokens, args.emsize, args.nhead, args.nhid, args.nlayers, args.dropout).to(device)
 else:
     model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.tied).to(device)
 
+class TransformerLR(torch.optim.lr_scheduler.LambdaLR):
+    """Warmup linearly and then decay proportionally to the inverse square root of the step number.
+    """
+    def __init__(self, optimizer, d_model, warmup_steps=4000, step_size=1, last_epoch=-1):
+        self.d_model = d_model
+        self.warmup_steps = warmup_steps
+        self.step_size = step_size
+        super(TransformerLR, self).__init__(optimizer, self.lr_lambda, last_epoch=last_epoch)
+
+    def lr_lambda(self, step):
+        if step // self.step_size == 0:
+            return 0
+        return (self.d_model ** -0.5) * \
+               min((step // self.step_size) ** -0.5, (step // self.step_size) * (self.warmup_steps ** -1.5))
+
+optimizer = optim.Adam(model.parameters(), lr=1)
+scheduler = TransformerLR(optimizer, args.emsize, warmup_steps=4000, step_size=args.step_size)
 criterion = nn.NLLLoss()
+
+writer = SummaryWriter(log_dir=args.tb_log)
 
 ###############################################################################
 # Training code
@@ -126,34 +155,52 @@ def repackage_hidden(h):
 # by the batchify function. The chunks are along dimension 0, corresponding
 # to the seq_len dimension in the LSTM.
 
-def get_batch(source, i):
-    seq_len = min(args.bptt, len(source) - 1 - i)
+def get_batch(source, i, seq_len):
+    seq_len = min(seq_len, len(source) - 1 - i)
     data = source[i:i+seq_len]
     target = source[i+1:i+1+seq_len].view(-1)
-    return data, target
+    return data.to(device), target.to(device)
 
 
-def evaluate(data_source):
+def evaluate(data_source, seq_len):
     # Turn on evaluation mode which disables dropout.
     model.eval()
     total_loss = 0.
     ntokens = len(corpus.dictionary)
-    if args.model != 'Transformer':
+    if args.model == 'LSTMTransformer':
+        inp = torch.empty(0, dtype=torch.int64).to(device)
+        hidden = model.init_hidden(eval_batch_size)
+        mems = None
+    elif args.model == 'Transformer':
+        inp = torch.empty(0, dtype=torch.int64).to(device)
+    else:
         hidden = model.init_hidden(eval_batch_size)
     with torch.no_grad():
-        for i in range(0, data_source.size(0) - 1, args.bptt):
-            data, targets = get_batch(data_source, i)
-            if args.model == 'Transformer':
-                output = model(data)
+        for i in range(0, data_source.size(0) - 1, seq_len):
+            data, targets = get_batch(data_source, i, seq_len)
+            if args.model == 'LSTMTransformer':
+                output, hidden, mems = model(data, hidden, mems)
                 output = output.view(-1, ntokens)
+                hidden = repackage_hidden(hidden)
+                mems = [mem[-args.bptt + seq_len:] for mem in mems] if args.bptt != seq_len else None
+            elif args.model == 'Transformer':
+                inp = torch.cat([inp, data], 0)[-args.bptt:]
+                output = model(inp)
+                output = output[-data.size(0):].view(-1, ntokens)
             else:
                 output, hidden = model(data, hidden)
                 hidden = repackage_hidden(hidden)
             total_loss += len(data) * criterion(output, targets).item()
+    model.train()
     return total_loss / (len(data_source) - 1)
 
 
+iteration = 0
+best_val_loss = None
+
 def train():
+    global iteration
+    global best_val_loss
     # Turn on training mode which enables dropout.
     model.train()
     total_loss = 0.
@@ -162,11 +209,15 @@ def train():
     if args.model != 'Transformer':
         hidden = model.init_hidden(args.batch_size)
     for batch, i in enumerate(range(0, train_data.size(0) - 1, args.bptt)):
-        data, targets = get_batch(train_data, i)
+        data, targets = get_batch(train_data, i, args.bptt)
         # Starting each batch, we detach the hidden state from how it was previously produced.
         # If we didn't, the model would try backpropagating all the way to start of the dataset.
-        model.zero_grad()
-        if args.model == 'Transformer':
+        optimizer.zero_grad()
+        if args.model == 'LSTMTransformer':
+            hidden = repackage_hidden(hidden)
+            output, hidden, _ = model(data, hidden)
+            output = output.view(-1, ntokens)
+        elif args.model == 'Transformer':
             output = model(data)
             output = output.view(-1, ntokens)
         else:
@@ -177,21 +228,39 @@ def train():
 
         # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
-        for p in model.parameters():
-            p.data.add_(-lr, p.grad.data)
+        optimizer.step()
+        scheduler.step()
 
         total_loss += loss.item()
+
+        writer.add_scalar('train/loss', loss.item(), iteration)
+        writer.add_scalar('train/ppl', math.exp(loss.item()), iteration)
 
         if batch % args.log_interval == 0 and batch > 0:
             cur_loss = total_loss / args.log_interval
             elapsed = time.time() - start_time
-            print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2f} | ms/batch {:5.2f} | '
+            print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.5f} | ms/batch {:5.2f} | '
                     'loss {:5.2f} | ppl {:8.2f}'.format(
-                epoch, batch, len(train_data) // args.bptt, lr,
+                epoch, batch, len(train_data) // args.bptt, scheduler.get_lr()[0],
                 elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss)))
             total_loss = 0
             start_time = time.time()
 
+        if iteration % args.val_interval == 0 and iteration > 0:
+            val_loss = evaluate(val_data, args.bptt)
+            print('-' * 89)
+            print('| end of iteration {} | valid loss {:5.2f} | '
+                    'valid ppl {:8.2f}'.format(iteration, val_loss, math.exp(val_loss)))
+            print('-' * 89)
+            writer.add_scalar('val/loss', val_loss, iteration)
+            writer.add_scalar('val/ppl', math.exp(val_loss), iteration)
+            # Save the model if the validation loss is the best we've seen so far.
+            if not best_val_loss or val_loss < best_val_loss:
+                with open(args.save, 'wb') as f:
+                    torch.save(model, f)
+                best_val_loss = val_loss
+
+        iteration += 1
 
 def export_onnx(path, batch_size, seq_len):
     print('The model is also exported in ONNX format at {}'.
@@ -202,29 +271,10 @@ def export_onnx(path, batch_size, seq_len):
     torch.onnx.export(model, (dummy_input, hidden), path)
 
 
-# Loop over epochs.
-lr = args.lr
-best_val_loss = None
-
 # At any point you can hit Ctrl + C to break out of training early.
 try:
     for epoch in range(1, args.epochs+1):
-        epoch_start_time = time.time()
         train()
-        val_loss = evaluate(val_data)
-        print('-' * 89)
-        print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
-                'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
-                                           val_loss, math.exp(val_loss)))
-        print('-' * 89)
-        # Save the model if the validation loss is the best we've seen so far.
-        if not best_val_loss or val_loss < best_val_loss:
-            with open(args.save, 'wb') as f:
-                torch.save(model, f)
-            best_val_loss = val_loss
-        else:
-            # Anneal the learning rate if no improvement has been seen in the validation dataset.
-            lr /= 4.0
 except KeyboardInterrupt:
     print('-' * 89)
     print('Exiting from training early')
@@ -239,7 +289,7 @@ with open(args.save, 'rb') as f:
         model.rnn.flatten_parameters()
 
 # Run on test data.
-test_loss = evaluate(test_data)
+test_loss = evaluate(test_data, 1)
 print('=' * 89)
 print('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
     test_loss, math.exp(test_loss)))
@@ -248,3 +298,5 @@ print('=' * 89)
 if len(args.onnx_export) > 0:
     # Export the model in ONNX format.
     export_onnx(args.onnx_export, batch_size=1, seq_len=args.bptt)
+
+writer.close()
