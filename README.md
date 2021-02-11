@@ -2,7 +2,7 @@
 
 <!-- Please read [this article]() (in Japanese). -->
 
-This repository is based on [Word Language Model of pytorch/examples](https://github.com/pytorch/examples/tree/490243127c02a5ea3348fa4981ecd7e9bcf6144c/word_language_model).
+This repository is based on [Word Language Model in pytorch/examples](https://github.com/pytorch/examples/tree/490243127c02a5ea3348fa4981ecd7e9bcf6144c/word_language_model).
 
 ## Installation
 
@@ -47,3 +47,7 @@ Generating text
 ```
 ./generate.sh [ LSTMTransformer, Transformer, LSTM ]
 ```
+
+## License
+
+See [LICENSE](https://github.com/tanikawa04/lstm-transformer/blob/master/LICENSE).
